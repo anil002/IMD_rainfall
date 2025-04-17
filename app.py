@@ -39,7 +39,7 @@ def load_data(pincode_df=None, file_path='1901-2022.nc'):
             st.warning("The 'dask' package is not installed. Loading without chunking, which may use more memory.")
         
         if not os.path.exists(file_path):
-            url = "https://zenodo.org/records/15225682/files/Indian_Daily_Rainfall_1901_2022.nc?download=1"
+            url = "https://zenodo.org/records/15225682"
             st.info("Downloading dataset from Zenodo (~6.5 GB, may take several minutes)...")
             response = requests.get(url, stream=True, timeout=60)
             response.raise_for_status()
