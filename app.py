@@ -16,6 +16,7 @@ import requests
 from geopy.geocoders import Nominatim
 import os
 import importlib.util
+import time
 
 # Configure Streamlit page
 st.set_page_config(
@@ -26,7 +27,7 @@ st.set_page_config(
 
 # Cache data loading
 @st.cache_data
-def load_data(pincode_df=None, file_path='1901-2022.nc'):
+def load_data(pincode_df=None, file_path='2000_2022.nc'):
     try:
         # Check if netCDF4 is installed
         if importlib.util.find_spec('netCDF4') is None:
@@ -38,14 +39,50 @@ def load_data(pincode_df=None, file_path='1901-2022.nc'):
         if not use_chunks:
             st.warning("The 'dask' package is not installed. Loading without chunking, which may use more memory.")
         
+        # Google Drive URL for subsetted dataset
+        url = "https://drive.google.com/uc?export=download&id=1uvAiLbh1j-xykSuk-Mc0jM24hREDG1Ti"
+        
         if not os.path.exists(file_path):
-            url = "https://zenodo.org/records/15225682"
-            st.info("Downloading dataset from Zenodo (~6.5 GB, may take several minutes)...")
-            response = requests.get(url, stream=True, timeout=60)
-            response.raise_for_status()
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            st.info(f"Downloading dataset from Google Drive (~1–2 GB, may take a few minutes)...")
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    response = requests.get(url, stream=True, timeout=60)
+                    response.raise_for_status()
+                    with open(file_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    st.success(f"Dataset downloaded successfully to {file_path}")
+                    break
+                except requests.exceptions.HTTPError as e:
+                    if response.status_code == 403:
+                        st.error(
+                            f"HTTP 403 Forbidden: Cannot download dataset. "
+                            "Please ensure the Google Drive file (https://drive.google.com/file/d/1uvAiLbh1j-xykSuk-Mc0jM24hREDG1Ti/view?usp=drive_link) "
+                            "is shared as 'Anyone with the link' (Viewer). "
+                            "Right-click the file in Google Drive, select 'Share', set 'General access' to 'Anyone with the link', and retry."
+                        )
+                    elif response.status_code == 404:
+                        st.error(
+                            f"HTTP 404 Not Found: File not found on Google Drive. "
+                            "Please verify the file ID (1uvAiLbh1j-xykSuk-Mc0jM24hREDG1Ti) is correct or re-upload "
+                            "Indian_Daily_Rainfall_2000_2022.nc to Google Drive and update the URL in app.py."
+                        )
+                    else:
+                        st.error(f"HTTP Error {response.status_code}: {e}")
+                    if attempt == retries - 1:
+                        st.error("All download attempts failed. Please check the Google Drive link and sharing settings.")
+                        return None
+                    time.sleep(2)
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Network error on attempt {attempt + 1}/{retries}: {e}. Retrying...")
+                    if attempt == retries - 1:
+                        st.error(
+                            "Failed to download dataset after retries. "
+                            "Please check your network connection and ensure the Google Drive file is accessible."
+                        )
+                        return None
+                    time.sleep(2)
         
         # Open dataset, use chunking if dask is available
         open_kwargs = {'engine': 'netcdf4'}
@@ -67,15 +104,10 @@ def load_data(pincode_df=None, file_path='1901-2022.nc'):
             lon_bounds = (float(ds.LONGITUDE.min()), float(ds.LONGITUDE.max()))
             if not (lat_bounds[0] <= lat <= lat_bounds[1] and lon_bounds[0] <= lon <= lon_bounds[1]):
                 st.warning(f"Pin code coordinates ({lat}, {lon}) are outside dataset bounds ({lat_bounds}, {lon_bounds}). Using nearest grid point.")
-            # Select nearest grid point first
+            # Select nearest grid point
             ds = ds.sel(LATITUDE=lat, LONGITUDE=lon, method='nearest')
-            # Then slice time range to reduce memory
-            ds = ds.sel(TIME=slice('2000-01-01', '2022-12-31'))
         
         return ds
-    except requests.exceptions.RequestException as e:
-        st.error(f"Failed to download dataset: {e}. Try hosting on Google Drive or subsetting the file.")
-        return None
     except ValueError as e:
         st.error(f"Failed to open dataset: {e}. Ensure the file is a valid NetCDF and 'netCDF4' is installed.")
         return None
@@ -84,34 +116,37 @@ def load_data(pincode_df=None, file_path='1901-2022.nc'):
         return None
 
 # Fetch pincode data and coordinates
-def fetch_pincode_data(pincode):
-    try:
-        url = f"https://api.postalpincode.in/pincode/{pincode}"
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        if data[0]['Status'] == 'Success' and data[0]['PostOffice']:
-            post_office = data[0]['PostOffice'][0]
-            district = post_office.get('District', '')
-            state = post_office.get('State', '')
-            geolocator = Nominatim(user_agent="rainfall_dashboard")
-            query = f"{pincode}, {district}, {state}, India"
-            location = geolocator.geocode(query, timeout=10)
-            if location:
-                return pd.DataFrame({
-                    'pincode': [pincode],
-                    'latitude': [location.latitude],
-                    'longitude': [location.longitude],
-                    'district': [district],
-                    'state': [state]
-                })
-            st.error(f"Coordinates not found for pin code {pincode}.")
+def fetch_pincode_data(pincode, retries=3):
+    for attempt in range(retries):
+        try:
+            url = f"https://api.postalpincode.in/pincode/{pincode}"
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if data[0]['Status'] == 'Success' and data[0]['PostOffice']:
+                post_office = data[0]['PostOffice'][0]
+                district = post_office.get('District', '')
+                state = post_office.get('State', '')
+                geolocator = Nominatim(user_agent="rainfall_dashboard")
+                query = f"{pincode}, {district}, {state}, India"
+                location = geolocator.geocode(query, timeout=10)
+                if location:
+                    return pd.DataFrame({
+                        'pincode': [pincode],
+                        'latitude': [location.latitude],
+                        'longitude': [location.longitude],
+                        'district': [district],
+                        'state': [state]
+                    })
+                st.error(f"Coordinates not found for pin code {pincode}.")
+                return None
+            st.error(f"Invalid pin code: {pincode}")
             return None
-        st.error(f"Invalid pin code: {pincode}")
-        return None
-    except Exception as e:
-        st.error(f"Failed to fetch pin code data: {e}")
-        return None
+        except Exception as e:
+            if attempt == retries - 1:
+                st.error(f"Failed to fetch pin code data after {retries} attempts: {e}")
+                return None
+            time.sleep(1)
 
 # Convert pincode data to GeoDataFrame
 def create_pincode_gdf(pincode_df):
@@ -126,7 +161,6 @@ def create_pincode_gdf(pincode_df):
 # Get nearest rainfall value
 def get_nearest_rainfall(_ds, selected_date):
     try:
-        # Dataset is already subset to nearest grid point and time range
         rainfall = _ds.RAINFALL.sel(TIME=selected_date).values
         if np.isnan(rainfall):
             st.warning("No rainfall data available for the selected date.")
@@ -141,7 +175,6 @@ def get_nearest_rainfall(_ds, selected_date):
 def calculate_trends(_ds, start_year=None, end_year=None, _gdf=None):
     try:
         if _gdf is not None:
-            # Dataset is already subset to nearest grid point
             yearly_means = _ds.RAINFALL.groupby('TIME.year').mean()
             years = yearly_means.year.values
             y = yearly_means.values
@@ -230,8 +263,7 @@ def create_map(_ds, selected_date, _gdf=None):
                 icon=folium.Icon(color='blue')
             ).add_to(m)
         else:
-            # Only generate heatmap for full dataset (no pin code)
-            if _ds.LATITUDE.ndim == 1 and _ds.LONGITUDE.ndim == 1:  # Check if arrays
+            if _ds.LATITUDE.ndim == 1 and _ds.LONGITUDE.ndim == 1:
                 center = [float(_ds.LATITUDE.mean()), float(_ds.LONGITUDE.mean())]
                 m = folium.Map(location=center, zoom_start=5, tiles="CartoDB positron")
                 rainfall_data = _ds.RAINFALL.sel(TIME=selected_date).values
@@ -255,7 +287,7 @@ def create_map(_ds, selected_date, _gdf=None):
 # Main dashboard
 def main():
     st.title("🌧️ Rainfall Analysis Dashboard for Pin Code")
-    st.markdown("Analyze rainfall patterns using the nearest grid point for a specific pin code. Data: Zenodo, DOI: 10.5281/zenodo.15225682")
+    st.markdown("Analyze rainfall patterns (2000–2022) using the nearest grid point for a specific pin code.")
     
     col1, col2 = st.columns([1, 3])
     
@@ -272,7 +304,6 @@ def main():
                 pincode_df = fetch_pincode_data(pincode_input)
                 gdf = create_pincode_gdf(pincode_df)
         
-        # Load data after getting pin code for subsetting
         ds = None
         if pincode_df is not None:
             ds = load_data(pincode_df)
@@ -280,7 +311,7 @@ def main():
             st.error("Cannot load data without valid pin code coordinates.")
             return
         else:
-            ds = load_data()  # Load full dataset for Daily Map without pin code
+            ds = load_data()
         
         if ds is None:
             st.error("Failed to load dataset. Please check logs or try again.")
