@@ -1,0 +1,9 @@
+folium
+imdlib
+streamlit
+geopandas
+xarray
+pandas
+matplotlib
+h5netcdf
+streamlit_folium
